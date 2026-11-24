@@ -5,6 +5,11 @@ Version 1.1.1 | For game version 2.5 | Status: runs in game (the mod's own log s
 
 > This is an unofficial fan work and is not approved/endorsed by CD PROJEKT RED. No game files are included.
 
+<p>
+<img src="docs/media/overlay-window.png" width="480" alt="The Cyberslop Salvage window with carry drone and van crew buttons and collapsed rows for five salvage androids and the drone showing location, load and condition.">
+<img src="docs/media/mock-test.png" width="480" alt="The offline mock test passing: 125 passed, 0 failed">
+</p>
+
 ## The problem
 
 After a large fight, looting every body by hand is a chore, and the companion-drone mod used before did far more than was needed here. The goal was a helper that does one job and costs almost nothing when idle.
@@ -101,12 +106,6 @@ Five hotkeys can be bound in CET's Bindings tab, all unbound by default: carry d
 **Other fixes from the same review.** The list of already-looted bodies survived a load, so enemies killed again after a reload were skipped; it is cleared on load now. A unit sent on a trip counted as "in the field" until it had walked off, so a save in that window stored it as both away and out; the trip now takes it out of the field at once.
 
 **Rollback.** Each version was installed by a script that kept the previous files and had a revert switch. For a user: delete two folders.
-
-## Media
-
-![The Cyberslop Salvage window with carry drone and van crew buttons and collapsed rows for five salvage androids and the drone showing location, load and condition.](docs/media/overlay-window.png)
-
-![The offline mock test passing: 125 passed, 0 failed](docs/media/mock-test.png)
 
 ## Changelog
 
