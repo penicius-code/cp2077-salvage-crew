@@ -3,6 +3,8 @@
 Salvage androids and a salvage drone that collect loot from downed enemies after a fight, for Cyberpunk 2077. Single-player only.
 Version 1.1.1 | For game version 2.5 | Status: runs in game (the mod's own log shows deploying, looting, standby and service); no written test pass yet, see Status
 
+**Download:** [latest release](https://github.com/penicius-code/cp2077-salvage-crew/releases/latest) (zip; install steps below)
+
 > This is an unofficial fan work and is not approved/endorsed by CD PROJEKT RED. No game files are included.
 
 <p>
@@ -48,7 +50,7 @@ No other mod is needed. Requirements are not bundled.
 ## Install
 
 1. Install the requirements above.
-2. Copy the contents of `package/` into the game folder.
+2. Download the zip from the [latest release](https://github.com/penicius-code/cp2077-salvage-crew/releases/latest) (the same files as `package/` in this repository) and extract it into the game folder.
 3. Start the game, load a save, open the CET overlay and find the "Cyberslop Salvage" window. Stand next to a car you own and press "Deploy" for android 1.
 
 ## Uninstall / roll back
