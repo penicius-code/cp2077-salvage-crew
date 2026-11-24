@@ -104,6 +104,8 @@ Five hotkeys can be bound in CET's Bindings tab, all unbound by default: carry d
 
 ## Media
 
+![The Cyberslop Salvage window with carry drone and van crew buttons and collapsed rows for five salvage androids and the drone showing location, load and condition.](docs/media/overlay-window.png)
+
 ![The offline mock test passing: 125 passed, 0 failed](docs/media/mock-test.png)
 
 ## Changelog
