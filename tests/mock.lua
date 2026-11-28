@@ -1,4 +1,6 @@
--- Mock run of CyberslopSalvage 1.1.1 init.lua: stubs the CET / game API and the redscript system.
+-- Mock run of CyberslopSalvage 1.2.1 init.lua: stubs the CET / game API and the redscript system.
+-- 1.2.0: a drop made with hidden = true is not returned by the targeting query (as dropped guns in the
+-- game); FindWeaponDrops / FoundPlain / LootDrop / LastHow / DropsKnown stand in for the redscript side.
 -- Run: luajit mock.lua <path to init.lua>     (writes nothing: the mod's log is kept in memory)
 local INIT = arg[1]
 local pass, fail = 0, 0
@@ -18,11 +20,15 @@ local function newEnt(kind, x, y, z, opts)
   opts = opts or {}
   local e = { kind = kind, pos = V4(x, y, z), hash = nextHash, items = opts.items or {},
               dead = opts.dead or false, civ = opts.civ or false, defined = true, yaw = 0,
-              own = opts.own, van = opts.van, bike = opts.bike }
+              own = opts.own, van = opts.van, bike = opts.bike,
+              hidden = opts.hidden, linked = opts.linked, vDropped = opts.vDropped, quest = opts.quest }
   function e:GetWorldPosition() return V4(self.pos.x, self.pos.y, self.pos.z) end
   function e:GetWorldForward() return { x = 0, y = 1, z = 0 } end
   function e:GetWorldYaw() return self.yaw end
   function e:GetEntityID() return { hash = self.hash } end
+  e.app = "random_skin"
+  function e:GetCurrentAppearanceName() return self.app end
+  function e:ScheduleAppearanceChange(n) self.app = n end
   function e:IsPlayer() return self.kind == "player" end
   function e:IsNPC() return self.kind == "npc" or self.kind == "unit" end
   function e:IsDead() return self.dead end
@@ -59,8 +65,8 @@ local function d2(a, b) return math.sqrt((a.x - b.x) ^ 2 + (a.y - b.y) ^ 2) end
 local R = { rows = {}, nextId = 1, version = 1, jobs = {}, lastCash = 0, lastLeft = 0, paid = {},
             wear = { 0, 0, 0, 0, 0, 0 }, served = { 0, 0, 0, 0, 0, 0 }, field = { 0, 0, 0, 0, 0, 0 },
             fieldAt = { 0, 0, 0, 0, 0, 0 }, serviceText = "", carHow = "none" }
-local KG = { gun = 4.0, jacket = 1.5, junk = 0.5, ammo = 0.0, comp = 0.0 }
-local CATOF = { gun = 0, jacket = 1, junk = 8, ammo = 6, comp = 7 }
+local KG = { gun = 4.0, jacket = 1.5, junk = 0.5, ammo = 0.0, comp = 0.0, iconic = 3.0 }
+local CATOF = { gun = 0, jacket = 1, junk = 8, ammo = 6, comp = 7, iconic = 9 }
 local RATE = { [0] = 0.6, [1] = 0.3, [2] = 0.1 }
 local PRICE = { [0] = 25, [1] = 50, [2] = 120 }
 local QNAME = { [0] = "Common", [1] = "Uncommon", [2] = "Rare" }
@@ -69,15 +75,78 @@ function R:UnitName(unit)
   if unit == 1 then return "Salvage android 1" end
   return "Salvage android " .. (unit - 1)
 end
-function R:LootFrom(unit, src, cap)
-  self.lastCash, self.lastLeft = 0, 0
+function R:LootFrom(unit, src, cap) return self:lootRun(unit, src, nil, cap, true) end
+function R:LootDrop(unit, src, carrier, cap, takeOwn)
+  self.dropCalls = (self.dropCalls or 0) + 1
+  return self:lootRun(unit, src, carrier, cap, takeOwn)
+end
+function R:LastHow() return self.lastHow or "" end
+function R:LastWhat() return self.lastWhat or "" end
+-- 1.2.1: "hidden" stands for an item the unit never takes (HideInUI / quest)
+function R:LootableCount(src, takeOwn)
+  self.countCalls = (self.countCalls or 0) + 1
+  if src.kind == "drop" and src.vDropped and not takeOwn then return 0 end
+  local n = 0
+  for _, it in ipairs(src.items) do if it ~= "hidden" then n = n + 1 end end
+  if src.kind == "drop" and src.linked then n = n + 1 end
+  return n
+end
+function R:DropsKnown()
+  local n = 0
+  for _, e in ipairs(world.ents) do if e.kind == "drop" and e.defined then n = n + 1 end end
+  return n
+end
+-- weapon kind of a drop: 0 none, 1 iconic only, 2 a plain gun
+local function gunKind(e, takeOwn)
+  if e.quest or (e.vDropped and not takeOwn) then return 0 end
+  local kind = 0
+  local function see(it)
+    if it == "gun" then kind = 2 elseif it == "iconic" and kind < 1 then kind = 1 end
+  end
+  for _, it in ipairs(e.items) do see(it) end
+  if kind == 0 and e.linked then see(e.linked) end
+  return kind
+end
+function R:FindWeaponDrops(maxDist, takeOwn)
+  world.gunQueries = (world.gunQueries or 0) + 1
+  local out = {}
+  self.foundPlain = {}
+  for _, e in ipairs(world.ents) do
+    if e.kind == "drop" and e.defined and d2(e.pos, player.pos) <= maxDist then
+      local kind = gunKind(e, takeOwn)
+      if kind > 0 then
+        out[#out + 1] = e
+        self.foundPlain[#out] = kind == 2
+      end
+    end
+  end
+  return out
+end
+function R:FoundPlain(i) return self.foundPlain[i + 1] == true end
+function R:lootRun(unit, src, carrier, cap, takeOwn)
+  self.lastCash, self.lastLeft, self.lastHow, self.lastWhat = 0, 0, "", ""
   if self.jobs[unit] then return 0 end
-  self.wear[unit] = math.min(100, self.wear[unit] + 0.5)
+  local isDrop = src.kind == "drop"
+  self.wear[unit] = math.min(100, self.wear[unit] + (isDrop and 0.1 or 0.5))
   local load = self:CargoKg(unit)
   local taken = 0
   local keep = {}
-  for _, it in ipairs(src.items) do
-    if it == "cash" then
+  local list = src.items
+  if isDrop and src.linked and carrier then
+    -- the gun that is only linked to the drop: taken through the unit (TakeItem in the game)
+    list = {}
+    for _, it in ipairs(src.items) do list[#list + 1] = it end
+    list[#list + 1] = src.linked
+    src.linked = nil
+    self.lastHow = "linked"
+  elseif isDrop then
+    self.lastHow = "inventory"
+  end
+  if isDrop and src.vDropped and not takeOwn then list = {} keep = src.items self.lastHow = "" end
+  for _, it in ipairs(list) do
+    if it == "hidden" then
+      keep[#keep + 1] = it
+    elseif it == "cash" then
       self.lastCash = self.lastCash + 50
     elseif load + KG[it] > cap then
       self.lastLeft = self.lastLeft + 1
@@ -87,6 +156,7 @@ function R:LootFrom(unit, src, cap)
       self.rows[#self.rows + 1] = { id = self.nextId, unit = unit, rec = it, qty = 1, kg = KG[it], cat = CATOF[it], sell = 100 }
       self.nextId = self.nextId + 1
       taken = taken + 1
+      self.lastWhat = self.lastWhat .. (self.lastWhat ~= "" and ", " or "") .. string.format("Items.%s x1 %.2f kg each", it, KG[it])
     end
   end
   src.items = keep
@@ -261,6 +331,7 @@ TweakDB.SetFlatNoUpdate = TweakDB.SetFlat
 
 function IsDefined(x) return x ~= nil and (type(x) ~= "table" or x.defined ~= false) end
 CName = { new = function(s) return s end }
+function NameToString(n) return tostring(n) end
 EAIAttitude = { AIA_Friendly = 1 }
 gameGodModeType = { Immortal = 1 }
 moveMovementType = { Walk = 1 }
@@ -293,6 +364,8 @@ json = {
 }
 local hotkeys, events = {}, {}
 function registerHotkey(id, _, fn) hotkeys[id] = fn end
+local inputs = {}
+function registerInput(id, _, fn) inputs[id] = fn end
 function registerForEvent(ev, fn) events[ev] = fn end
 
 -- the mod's log goes to memory, its config is neither read nor written
@@ -345,7 +418,7 @@ Game = {
       world.queries = (world.queries or 0) + 1
       local parts = {}
       for _, e in ipairs(world.ents) do
-        if e.defined and e.kind ~= "player" then
+        if e.defined and e.kind ~= "player" and not e.hidden then
           if d2(e.pos, p.pos) <= q.maxDistance then
             local part = {}
             function part:GetComponent() return { GetEntity = function() return e end } end
@@ -381,7 +454,10 @@ ImGui = {
     return false
   end,
   CollapsingHeader = function() return true end,
-  Checkbox = function(_, v) return v, false end,
+  Checkbox = function(label, v)
+    if imguiClicks[label] then imguiClicks[label] = nil return not v, true end
+    return v, false
+  end,
   SliderInt = function(_, v) return v, false end,
 }
 
@@ -412,11 +488,26 @@ local function countNotice(pat)
   for _, n in ipairs(notices) do if n:find(pat, 1, true) then c = c + 1 end end
   return c
 end
-local function click(label)
+-- 1.1.1: Take needs the unit within 6 m of V. The flag is refreshed twice a second by os.clock,
+-- which advances here on every call; farTake = true leaves the units where they are.
+local clk = 0
+os.clock = function() clk = clk + 1 return clk end
+local function click(label, farTake)
+  local moved
+  if label:find("^Take") and not farTake then
+    moved = {}
+    for _, e in ipairs(world.ents) do
+      if e.kind == "unit" and e.defined then
+        moved[e] = e.pos
+        e.pos = V4(player.pos.x, player.pos.y, player.pos.z)
+      end
+    end
+  end
   imguiClicks[label] = true
   events.onDraw()
   local used = imguiClicks[label] == nil
   imguiClicks[label] = nil
+  if moved then for e, p in pairs(moved) do e.pos = p end end
   return used
 end
 local function drawn(label)
@@ -491,7 +582,8 @@ check("alive untouched", #alive.items == 1)
 check("cash notice", hasNotice("wired you"))
 check("back to follow after run", andr.role == "follow")
 check("cargo 14.0 kg", math.abs(R:CargoKg(1) - 14.0) < 0.01)
-check("bodies searched wear the unit (3 x 0.5 %)", math.abs(R:Wear(1) - 1.5) < 0.01)
+check("wear: 2 bodies x 0.5 % + 1 drop x 0.1 %", math.abs(R:Wear(1) - 1.1) < 0.01)
+check("the drop went through LootDrop", (R.dropCalls or 0) == 1)
 
 -- window: take one row via button
 -- 1.1.1: Take needs the unit within 6 m of the player. In the game a following unit walks up to the player;
@@ -500,6 +592,10 @@ andr.pos = V4(1.0, 0.0, 0.0)
 events.onUpdate(1.0)
 events.onDraw()
 local firstId = R:view(1)[1].id
+local posTake = andr.pos
+andr.pos = V4(player.pos.x + 20, player.pos.y, player.pos.z)
+check("1.1.1: no Take with the unit 20 m from V", not click("Take##" .. firstId, true) and R:Count(1) == 5)
+andr.pos = posTake
 click("Take##" .. firstId)
 check("take one row", R:Count(1) == 4 and R.paid[1] ~= nil)
 click("Take all##android0")
@@ -880,6 +976,182 @@ world.noPlayer = false
 hotkeys.cs_carry()
 step(1.2)
 check("menu reset lets carry redeploy", ent("Carry") ~= nil)
+
+-- ---------------------------------------------------------------- 1.2.0: guns on the ground
+clearBodies()
+player.pos = V4(0, 0, 0)
+van.defined = true
+local gunCountBefore = 0
+local function gunRows()
+  local n = 0
+  for _, r in ipairs(R:view(1)) do if r.rec == "gun" or r.rec == "iconic" then n = n + 1 end end
+  return n
+end
+-- room in the cargo, whatever the tests above left in it
+for i = #R.rows, 1, -1 do if R.rows[i].unit == 1 then table.remove(R.rows, i) end end
+R.version = R.version + 1
+R.wear[1] = 0
+-- none of these is returned by the targeting query, like a dropped gun in the game
+local looseGun = newEnt("drop", 15, 0, 0, { items = { "gun" }, hidden = true })
+local linkedGun = newEnt("drop", -15, 0, 0, { items = {}, linked = "gun", hidden = true })
+local looseIconic = newEnt("drop", 0, 15, 0, { items = { "iconic" }, hidden = true })
+local ownGun = newEnt("drop", 8, 8, 0, { items = { "gun" }, hidden = true, vDropped = true })
+local questGun = newEnt("drop", -8, 8, 0, { items = { "gun" }, hidden = true, quest = true })
+local ammoBag = newEnt("drop", 10, -10, 0, { items = { "ammo" } })          -- seen by targeting, no body near
+local farGun = newEnt("drop", 0, 30, 0, { items = { "gun" }, hidden = true })   -- outside the android's 25 m
+local b120 = newEnt("npc", -10, -10, 0, { dead = true, items = { "junk" } })
+local bodyIconic = newEnt("drop", -11, -11, 0, { items = { "iconic" }, hidden = true })
+logLines = {}
+R.dropCalls = 0
+hotkeys.cs_android()
+step(1.2)
+check("1.2.0: android out", ent("Android") ~= nil)
+check("1.2.0: drop count logged at deploy", hasLog("item drops known: "))
+step(60)
+check("loose gun 15 m from any body picked up", #looseGun.items == 0)
+check("gun linked to its drop (empty item list) picked up", linkedGun.linked == nil)
+check("the linked gun came through the unit", hasLog("(drop, linked)"))
+check("a gun from the drop's inventory is logged as such", hasLog("(drop, inventory)"))
+check("heading line names a loose gun", hasLog("(loose gun, "))
+check("loose iconic left for V", #looseIconic.items == 1)
+check("iconic next to a body picked up", #bodyIconic.items == 0 and hasLog("(gun by a body, "))
+check("weapon V dropped left alone", #ownGun.items == 1)
+check("quest drop left alone", #questGun.items == 1)
+check("ammo bag away from any body left alone, as before", #ammoBag.items == 1)
+check("gun outside the unit's radius left alone", #farGun.items == 1)
+check("the body is still searched", #b120.items == 0)
+check("three guns aboard", gunRows() == 3)
+check("wear: 1 body x 0.5 % + 3 pickups x 0.1 %", math.abs(R:Wear(1) - 0.8) < 0.01)
+check("drops went through LootDrop, the body through LootFrom", R.dropCalls == 3)
+check("no error in the log", not hasLog("error") and not hasLog("failed"))
+
+-- setting: weapons V dropped
+check("checkbox: also V's own", click("Also pick up weapons V dropped"))
+step(12)
+check("with the setting on, V's dropped gun is picked up", #ownGun.items == 0)
+check("checkbox: V's own off again", click("Also pick up weapons V dropped"))
+
+-- setting: loose guns off = only guns next to a body
+check("checkbox: loose guns off", click("Pick up guns lying away from any body"))
+local looseGun2 = newEnt("drop", 12, 3, 0, { items = { "gun" }, hidden = true })
+local b121 = newEnt("npc", -6, 12, 0, { dead = true, items = {} })
+local bodyGun = newEnt("drop", -7, 13, 0, { items = { "gun" }, hidden = true })
+step(20)
+check("loose guns off: gun away from a body stays", #looseGun2.items == 1)
+check("loose guns off: gun next to a body still picked up", #bodyGun.items == 0)
+check("checkbox: loose guns on again", click("Pick up guns lying away from any body"))
+step(15)
+check("loose guns on again: it is picked up", #looseGun2.items == 0)
+
+-- no looting in combat, also for guns
+local combatGun = newEnt("drop", 5, -12, 0, { items = { "gun" }, hidden = true })
+world.combat = true
+step(10)
+check("no gun pickup in combat", #combatGun.items == 1)
+world.combat = false
+step(15)
+check("picked up after combat", #combatGun.items == 0)
+
+-- 1.2.1: nothing to take = no visit; the loot line names the items
+check("1.2.1: the loot line names item and weight", hasLog("[Items.gun x1 4.00 kg each]"))
+check("1.2.1: the search asked LootableCount", (R.countCalls or 0) > 0)
+local b1210 = newEnt("npc", 3, -3, 0, { dead = true, items = { "hidden" } })
+local bag1210 = newEnt("drop", 4, -4, 0, { items = { "hidden" } })           -- seen by targeting, next to the body
+local wearBefore, dropsBefore = R:Wear(1), R.dropCalls
+logLines = {}
+step(20)
+check("1.2.1: body and bag with only hidden items are not visited",
+      R:Wear(1) == wearBefore and R.dropCalls == dropsBefore and not hasLog("heading to"))
+b1210.items = { "hidden", "junk" }
+bag1210.defined = false
+
+-- an older redscript part (no FindWeaponDrops, no LootableCount): bodies still looted, one log line, no spam
+local keepFind, keepCount = R.FindWeaponDrops, R.LootableCount
+R.FindWeaponDrops = nil
+R.LootableCount = nil
+dofile(INIT)
+events.onInit()
+logLines = {}
+local b122 = newEnt("npc", 6, 6, 0, { dead = true, items = { "junk" } })
+step(3)
+local andrOld = ent("Android")
+check("old redscript part: unit adopted after the reload", andrOld ~= nil)
+step(20)
+local gunFailLines = 0
+for _, l in ipairs(logLines) do if l:find("gun search failed", 1, true) then gunFailLines = gunFailLines + 1 end end
+check("old redscript part: gun search switched off with one log line", gunFailLines == 1)
+check("old redscript part: bodies still looted", #b122.items == 0)
+R.FindWeaponDrops = keepFind
+R.LootableCount = keepCount
+dofile(INIT)
+events.onInit()
+logLines = {}
+step(3)
+hotkeys.cs_android()
+step(17)
+clearBodies()
+check("1.2.0 section: android stowed again", ent("Android") == nil and R:Field(1) == 0)
+van.defined = false
+
+-- 1.2.3: android 1 key (Numpad 2): hold 0.5 s = deploy / send home, tap = go / wait
+van.defined = true
+local function press(sec) inputs.cs_android_key(true) step(sec) inputs.cs_android_key(false) end
+local n0 = #notices
+press(0.2)
+check("1.2.3 tap while stowed: nothing spawns", ent("Android") == nil and R:Field(1) == 0)
+check("1.2.3 tap while stowed: hint shown", (notices[#notices] or ""):find("Hold the key", 1, true) ~= nil and #notices > n0)
+inputs.cs_android_key(true)
+step(0.45)
+check("1.2.3 hold: nothing before 0.5 s", R:Field(1) == 0)
+step(0.15)
+check("1.2.3 hold: deploys while the key is still down", R:Field(1) == 1)
+step(1.0)
+inputs.cs_android_key(false)
+step(1.0)
+check("1.2.3 hold: android out, release adds no tap", ent("Android") ~= nil and R:Field(1) == 1)
+press(0.1)
+check("1.2.3 tap: android waits", R:Field(1) == 2)
+press(0.1)
+check("1.2.3 tap again: android goes on", R:Field(1) == 1)
+press(0.1)
+press(0.1)
+check("1.2.3 two taps: back to working", R:Field(1) == 1)
+press(0.1)
+check("1.2.3 tap: waits again", R:Field(1) == 2)
+local keepLog = logLines
+logLines = {}
+press(0.7)
+check("1.2.3 hold while waiting: sent home", hasLog("heading back. Cargo stays aboard"))
+for _, l in ipairs(logLines) do keepLog[#keepLog + 1] = l end
+logLines = keepLog
+step(17)
+check("1.2.3 hold: android stowed again", ent("Android") == nil and R:Field(1) == 0)
+inputs.cs_android_key(true)
+inputs.cs_android_key(true)   -- lost release: a new press starts over
+step(0.2)
+inputs.cs_android_key(false)
+check("1.2.3 lost release: the next short press is still a tap", ent("Android") == nil and R:Field(1) == 0)
+step(1)
+
+-- 1.2.4: the android record names its appearance, the spawned android shows it
+check("1.2.4 record appearance pinned", tweak["CyberslopSalvage.Android"]
+  and tweak["CyberslopSalvage.Android"].appearanceName == "corpo__android_ma_militech_droid__lvl2_01")
+check("1.2.4 van android records pinned", tweak["CyberslopSalvage.Android2"]
+  and tweak["CyberslopSalvage.Android2"].appearanceName ~= nil)
+check("1.2.4 drones keep their own appearance", tweak["CyberslopSalvage.Octant"]
+  and tweak["CyberslopSalvage.Octant"].appearanceName == "v")   -- copied from its base record, untouched
+inputs.cs_android_key(true)
+step(0.6)
+inputs.cs_android_key(false)
+step(1.5)
+local a124 = ent("Android")
+check("1.2.4 spawned android corrected to the pinned skin", a124 ~= nil and a124.app == "corpo__android_ma_militech_droid__lvl2_01")
+check("1.2.4 correction logged", hasLog("appearance random_skin -> corpo__android_ma_militech_droid__lvl2_01"))
+inputs.cs_android_key(true)
+step(0.6)
+inputs.cs_android_key(false)
+step(17)
+check("1.2.4 android stowed again", ent("Android") == nil and R:Field(1) == 0)
 
 -- shutdown removes the entities, the saved field state is left alone
 van.defined = true

@@ -1,9 +1,22 @@
-// Cyberslop Salvage 1.1.0 - cargo ledger, wear and field state of the salvage units.
+// Cyberslop Salvage 1.2.2 - cargo ledger, wear and field state of the salvage units.
+// 1.2.2: crash fix (CTD exe+0x270242 while a save loads, 3x on 2026-11-25). The OnGameAttached
+// wrap wrote straight into m_drops from every drop's attach; a save load attaches a burst of
+// drops. The wrap now only queues a CyberslopSalvageDropRequest and the system adds the drop
+// itself when it processes its request queue. Nothing but that handler writes m_drops from
+// outside a CET call any more. Never call a method of this system from an attach callback.
+// 1.2.1: LootableCount (a body or drop with nothing the unit takes is not visited), LastWhat (the
+// items of the last pickup with their weight, for the log).
+// 1.2.0: guns lying on the ground. The targeting query the CET side searches with does not return
+// dropped weapons, so every item drop reports itself here when it enters the world (the
+// OnGameAttached wrap at the end of this file, since 1.2.2 through a queued request) and
+// FindWeaponDrops() reads that list. A weapon V dropped (the DropAction wrap notes its ItemID) is left alone unless the CET
+// side asks for it. LootDrop() also takes a gun that is only linked to its drop, not in its
+// inventory (TransactionSystem.TakeItem into the unit, then the normal appraisal).
 // Units: 1 = android 1 (trunk of any own car), 2 = cargo drone, 3..6 = androids 2..5 (the van).
 // 1.1.0: wear per unit (game clock + bodies searched), service paid in crafting components from
 // V's bag (missing ones bought at market price), field state kept in the save (a unit that was
 // out is still out after a load), FindCar for the trunk / van rule.
-// No hooks, no wraps: plain methods, called from CET through
+// Two wraps since 1.2.0 (end of this file), else plain methods, called from CET through
 //   Game.GetScriptableSystemsContainer():Get("CyberslopSalvage.CyberslopSalvageSystem")
 // Each looted item is appraised ON THE BODY while its item data still exists (weight, vendor sell
 // price, tier, real dismantle yield incl. any wrap of CraftingSystem.GetDisassemblyResultItems),
@@ -14,6 +27,11 @@
 //             6 Ammo / grenades, 7 Components, 8 Junk / valuables, 9 Iconic / other (kept).
 // Revert: delete this folder.
 module CyberslopSalvage
+
+// 1.2.2: an item drop that entered the world, queued by the OnGameAttached wrap
+public class CyberslopSalvageDropRequest extends ScriptableSystemRequest {
+  public let drop: wref<gameItemDropObject>;
+}
 
 public class CyberslopSalvageSystem extends ScriptableSystem {
 
@@ -49,6 +67,16 @@ public class CyberslopSalvageSystem extends ScriptableSystem {
   private persistent let m_served: array<Float>;    // wear serviced so far, modulo 10 (kit bookkeeping)
   private persistent let m_field: array<Int32>;     // 0 home, 1 active, 2 standby
   private persistent let m_fieldAt: array<Float>;   // game clock of the last wear accrual
+  // 1.2.0: weapons V dropped (newest last, 64 at most): the units leave them alone
+  private persistent let m_ownDrops: array<ItemID>;
+
+  // 1.2.0: item drops in the world (weak refs, filled by the OnGameAttached wrap, never saved)
+  private let m_drops: array<wref<gameItemDropObject>>;
+  private let m_foundPlain: array<Bool>;
+  private let m_lastHow: String;
+  // 1.2.1: what the last LootFrom / LootDrop took (and, for a drop, what it skipped)
+  private let m_lastWhat: String;
+  private let m_noteSkips: Bool;
 
   private let m_version: Int32 = 1;
   private let m_lastCash: Int32 = 0;
@@ -250,28 +278,90 @@ public class CyberslopSalvageSystem extends ScriptableSystem {
   // Returns the number of items taken, -1 when the unit is full and nothing fitted.
   // Cash goes straight to V (LastCash), shards and keycards too. Quest items stay on the body.
   public final func LootFrom(unit: Int32, source: ref<GameObject>, capacityKg: Float) -> Int32 {
+    return this.LootRun(unit, source, null, capacityKg, true);
+  }
+
+  // 1.2.0: the same for an item drop (a gun on the ground, an ammo or loot bag). carrier = the
+  // unit's own entity, takeOwn = weapons V dropped are taken too. Wear: 0.1 % (a body: 0.5 %).
+  public final func LootDrop(unit: Int32, source: ref<GameObject>, carrier: ref<GameObject>, capacityKg: Float, takeOwn: Bool) -> Int32 {
+    return this.LootRun(unit, source, carrier, capacityKg, takeOwn);
+  }
+
+  private final func LootRun(unit: Int32, source: ref<GameObject>, carrier: ref<GameObject>, capacityKg: Float, takeOwn: Bool) -> Int32 {
+    let ts: ref<TransactionSystem> = GameInstance.GetTransactionSystem(this.GetGameInstance());
     let player: ref<GameObject> = this.Player();
+    let drop: ref<gameItemDropObject> = source as gameItemDropObject;
+    let linked: wref<ItemObject>;
     let items: array<wref<gameItemData>>;
     let i: Int32 = 0;
+    let n: Int32;
     let taken: Int32 = 0;
     this.m_lastCash = 0;
     this.m_lastLeft = 0;
+    this.m_lastHow = "";
+    this.m_lastWhat = "";
+    this.m_noteSkips = IsDefined(drop);
     if !IsDefined(source) || !IsDefined(player) || this.JobIndex(unit) >= 0 { return 0; };
     if this.ValidUnit(unit) {
       this.Ensure();
-      this.m_wear[unit] = MinF(100.0, this.m_wear[unit] + 0.5);   // one body searched
+      // one body searched, or one thing picked up off the ground
+      this.m_wear[unit] = MinF(100.0, this.m_wear[unit] + (IsDefined(drop) ? 0.1 : 0.5));
     };
     this.m_load = this.CargoKg(unit);
-    GameInstance.GetTransactionSystem(this.GetGameInstance()).GetItemList(source, items);
+    if IsDefined(drop) {
+      // the visible item of the drop; if the drop's inventory holds it, the loop below takes it
+      linked = drop.GetItemObject();
+      if IsDefined(linked) && ts.HasItem(source, linked.GetItemID()) { linked = null; };
+    };
+    ts.GetItemList(source, items);
     while i < ArraySize(items) {
-      if IsDefined(items[i]) {
-        taken += this.LootOne(unit, source, player, items[i], capacityKg);
+      if IsDefined(items[i]) && (takeOwn || !this.IsOwnDrop(items[i].GetID())) {
+        n = this.LootOne(unit, source, player, items[i], capacityKg);
+        if n > 0 { this.m_lastHow = "inventory"; };
+        taken += n;
       };
       i += 1;
+    };
+    if IsDefined(linked) && IsDefined(carrier) {
+      taken += this.LootLinked(unit, linked, carrier, player, capacityKg, takeOwn);
+    };
+    if IsDefined(drop) && taken > 0 {
+      // off the list: a drop that gave something up is never offered as a gun again
+      i = ArraySize(this.m_drops) - 1;
+      while i >= 0 {
+        if this.m_drops[i] == drop { ArrayErase(this.m_drops, i); };
+        i -= 1;
+      };
     };
     if taken > 0 || this.m_lastCash > 0 { this.m_version += 1; };
     if taken == 0 && this.m_lastLeft > 0 { return -1; };
     return taken;
+  }
+
+  // A gun that lies there as an entity linked to its drop but is not in the drop's inventory:
+  // the unit takes it the way an NPC picks up a weapon (TakeItem), then it is appraised and
+  // booked out of the unit like any other item. Checked first, because TakeItem moves it.
+  private final func LootLinked(unit: Int32, item: wref<ItemObject>, carrier: ref<GameObject>, player: ref<GameObject>, capacityKg: Float, takeOwn: Bool) -> Int32 {
+    let ts: ref<TransactionSystem> = GameInstance.GetTransactionSystem(this.GetGameInstance());
+    let data: wref<gameItemData> = item.GetItemData();
+    let itemID: ItemID = item.GetItemID();
+    let rec: wref<Item_Record>;
+    let kg: Float;
+    if !IsDefined(data) || !ItemID.IsValid(itemID) { return 0; };
+    if !takeOwn && this.IsOwnDrop(itemID) { return 0; };
+    rec = TweakDBInterface.GetItemRecord(ItemID.GetTDBID(itemID));
+    if !IsDefined(rec) || !IsDefined(rec.ItemType()) || !IsDefined(rec.ItemCategory()) { return 0; };
+    if data.HasTag(n"Quest") || data.HasTag(n"HideInUI") || this.IsBodyWeapon(rec.ItemType().Type()) { return 0; };
+    kg = RPGManager.GetItemWeight(data);
+    if kg > 0.0 && this.m_load + kg > capacityKg {
+      this.m_lastLeft += 1;
+      return 0;
+    };
+    if !ts.TakeItem(carrier, item) { return 0; };
+    data = ts.GetItemData(carrier, itemID);
+    if !IsDefined(data) { return 0; };
+    this.m_lastHow = "linked";
+    return this.LootOne(unit, carrier, player, data, capacityKg);
   }
 
   private final func LootOne(unit: Int32, source: ref<GameObject>, player: ref<GameObject>, data: wref<gameItemData>, capacityKg: Float) -> Int32 {
@@ -292,11 +382,12 @@ public class CyberslopSalvageSystem extends ScriptableSystem {
     let tier: Int32;
     let stack: Bool;
     let j: Int32;
-    if !IsDefined(rec) || qty <= 0 || data.HasTag(n"Quest") || data.HasTag(n"HideInUI") { return 0; };
-    if !IsDefined(rec.ItemType()) || !IsDefined(rec.ItemCategory()) { return 0; };
+    if !this.Wanted(data) {
+      if this.m_noteSkips { this.Say("skipped " + TDBID.ToStringDEBUG(tdb)); };
+      return 0;
+    };
     type = rec.ItemType().Type();
     cat = rec.ItemCategory().Type();
-    if this.IsBodyWeapon(type) { return 0; };
     if tdb == t"Items.money" {
       if ts.TransferItem(source, player, itemID, qty) { this.m_lastCash += qty; };
       return 0;
@@ -310,6 +401,7 @@ public class CyberslopSalvageSystem extends ScriptableSystem {
       fit = FloorF((capacityKg - this.m_load) / kg);
       if fit <= 0 {
         this.m_lastLeft += qty;
+        this.Say("no room for " + TDBID.ToStringDEBUG(tdb));
         return 0;
       };
       this.m_lastLeft += qty - fit;
@@ -357,12 +449,174 @@ public class CyberslopSalvageSystem extends ScriptableSystem {
     };
     ts.RemoveItem(source, itemID, qty);
     this.m_load += kg * Cast<Float>(qty);
+    this.Say(TDBID.ToStringDEBUG(tdb) + " x" + IntToString(qty) + " " + FloatToStringPrec(kg, 2) + " kg each");
     return qty;
+  }
+
+  // 1.2.1: one more entry of the "what was taken" text (capped, a body can hold many items)
+  private final func Say(s: String) -> Void {
+    if StrLen(this.m_lastWhat) > 500 { return; };
+    if StrLen(this.m_lastWhat) > 0 { this.m_lastWhat = this.m_lastWhat + ", "; };
+    this.m_lastWhat = this.m_lastWhat + s;
+  }
+
+  // 1.2.1: an item the unit does something with (cargo, or cash / shard / keycard passed on to V)
+  private final func Wanted(data: wref<gameItemData>) -> Bool {
+    let rec: wref<Item_Record>;
+    if !IsDefined(data) { return false; };
+    rec = TweakDBInterface.GetItemRecord(ItemID.GetTDBID(data.GetID()));
+    if !IsDefined(rec) || data.GetQuantity() <= 0 || data.HasTag(n"Quest") || data.HasTag(n"HideInUI") { return false; };
+    if !IsDefined(rec.ItemType()) || !IsDefined(rec.ItemCategory()) { return false; };
+    return !this.IsBodyWeapon(rec.ItemType().Type());
+  }
+
+  // 1.2.1: how many item stacks of this body or drop the unit would act on. 0 = not worth the walk
+  // (the CET search skips it). Same rules as LootOne / LootLinked, capacity aside.
+  public final func LootableCount(source: ref<GameObject>, takeOwn: Bool) -> Int32 {
+    let ts: ref<TransactionSystem> = GameInstance.GetTransactionSystem(this.GetGameInstance());
+    let drop: ref<gameItemDropObject> = source as gameItemDropObject;
+    let linked: wref<ItemObject>;
+    let items: array<wref<gameItemData>>;
+    let i: Int32 = 0;
+    let n: Int32 = 0;
+    if !IsDefined(source) { return 0; };
+    ts.GetItemList(source, items);
+    while i < ArraySize(items) {
+      if this.Wanted(items[i]) && (takeOwn || !this.IsOwnDrop(items[i].GetID())) { n += 1; };
+      i += 1;
+    };
+    if IsDefined(drop) {
+      linked = drop.GetItemObject();
+      if IsDefined(linked) && !ts.HasItem(source, linked.GetItemID()) && this.Wanted(linked.GetItemData()) && (takeOwn || !this.IsOwnDrop(linked.GetItemID())) {
+        n += 1;
+      };
+    };
+    return n;
   }
 
   public final func LastCash() -> Int32 { return this.m_lastCash; }
   // items left on the last body because the unit was full
   public final func LastLeft() -> Int32 { return this.m_lastLeft; }
+  // how the last drop gave up its item: "inventory", "linked" or "" (nothing taken)
+  public final func LastHow() -> String { return this.m_lastHow; }
+  // 1.2.1: record, quantity and weight of each item of the last pickup, comma separated
+  public final func LastWhat() -> String { return this.m_lastWhat; }
+
+  // ---------- guns on the ground (1.2.0) ----------
+
+  // 1.2.2: the queued report of the OnGameAttached wrap, run by the system's own request queue
+  private final func OnCyberslopSalvageDropRequest(request: ref<CyberslopSalvageDropRequest>) -> Void {
+    if IsDefined(request) { this.NoteDrop(request.drop); };
+  }
+
+  // every item drop that entered the world; only the request handler above calls this
+  private final func NoteDrop(drop: wref<gameItemDropObject>) -> Void {
+    let i: Int32;
+    if !IsDefined(drop) { return; };
+    if ArraySize(this.m_drops) >= 512 {
+      i = ArraySize(this.m_drops) - 1;
+      while i >= 0 {
+        if !IsDefined(this.m_drops[i]) { ArrayErase(this.m_drops, i); };
+        i -= 1;
+      };
+      // 512 live drops (a loot-dense place): forget the oldest quarter
+      i = 0;
+      while ArraySize(this.m_drops) >= 512 && i < 128 {
+        ArrayErase(this.m_drops, 0);
+        i += 1;
+      };
+    };
+    ArrayPush(this.m_drops, drop);
+  }
+
+  // called by the DropAction wrap: V dropped this weapon
+  public final func NoteOwnDrop(itemID: ItemID) -> Void {
+    if !ItemID.IsValid(itemID) || this.IsOwnDrop(itemID) { return; };
+    while ArraySize(this.m_ownDrops) >= 64 { ArrayErase(this.m_ownDrops, 0); };
+    ArrayPush(this.m_ownDrops, itemID);
+  }
+
+  private final func IsOwnDrop(itemID: ItemID) -> Bool {
+    let i: Int32 = 0;
+    while i < ArraySize(this.m_ownDrops) {
+      if this.m_ownDrops[i] == itemID { return true; };
+      i += 1;
+    };
+    return false;
+  }
+
+  public final func DropsKnown() -> Int32 { return ArraySize(this.m_drops); }
+
+  // 0 = not a weapon the units take, 1 = a weapon, 2 = a plain weapon (not iconic)
+  private final func WeaponKind(data: wref<gameItemData>, player: ref<GameObject>, takeOwn: Bool) -> Int32 {
+    let rec: wref<Item_Record>;
+    let itemID: ItemID;
+    if !IsDefined(data) { return 0; };
+    itemID = data.GetID();
+    rec = TweakDBInterface.GetItemRecord(ItemID.GetTDBID(itemID));
+    if !IsDefined(rec) || !IsDefined(rec.ItemType()) || !IsDefined(rec.ItemCategory()) { return 0; };
+    if NotEquals(rec.ItemCategory().Type(), gamedataItemCategory.Weapon) || this.IsBodyWeapon(rec.ItemType().Type()) { return 0; };
+    if data.HasTag(n"Quest") || data.HasTag(n"HideInUI") { return 0; };
+    if !takeOwn && this.IsOwnDrop(itemID) { return 0; };
+    // a thrown knife or axe that is still V's
+    if GameInstance.GetTransactionSystem(this.GetGameInstance()).HasItem(player, itemID) { return 0; };
+    if RPGManager.IsItemIconic(data) { return 1; };
+    return 2;
+  }
+
+  // Item drops within maxDist of V that hold a weapon the units take (never a quest drop).
+  // FoundPlain(i) of the same call: false = iconic, which the CET side takes only next to a body.
+  public final func FindWeaponDrops(maxDist: Float, takeOwn: Bool) -> array<ref<GameObject>> {
+    let ts: ref<TransactionSystem> = GameInstance.GetTransactionSystem(this.GetGameInstance());
+    let player: ref<GameObject> = this.Player();
+    let out: array<ref<GameObject>>;
+    let items: array<wref<gameItemData>>;
+    let drop: ref<gameItemDropObject>;
+    let obj: ref<GameObject>;
+    let linked: wref<ItemObject>;
+    let from: Vector4;
+    let kind: Int32;
+    let k: Int32;
+    let j: Int32;
+    let i: Int32 = ArraySize(this.m_drops) - 1;
+    ArrayClear(this.m_foundPlain);
+    if !IsDefined(player) { return out; };
+    from = player.GetWorldPosition();
+    while i >= 0 {
+      drop = this.m_drops[i];
+      if !IsDefined(drop) {
+        ArrayErase(this.m_drops, i);
+      } else {
+        obj = drop;
+        if drop.IsAttached() && !drop.IsQuest() && Vector4.Distance(from, drop.GetWorldPosition()) <= maxDist && !ArrayContains(out, obj) {
+          kind = 0;
+          ArrayClear(items);
+          ts.GetItemList(drop, items);
+          j = 0;
+          while j < ArraySize(items) {
+            k = this.WeaponKind(items[j], player, takeOwn);
+            if k > kind { kind = k; };
+            j += 1;
+          };
+          if kind == 0 {
+            linked = drop.GetItemObject();
+            if IsDefined(linked) { kind = this.WeaponKind(linked.GetItemData(), player, takeOwn); };
+          };
+          if kind > 0 {
+            ArrayPush(out, obj);
+            ArrayPush(this.m_foundPlain, kind == 2);
+          };
+        };
+      };
+      i -= 1;
+    };
+    return out;
+  }
+
+  public final func FoundPlain(index: Int32) -> Bool {
+    if index < 0 || index >= ArraySize(this.m_foundPlain) { return false; };
+    return this.m_foundPlain[index];
+  }
 
   // ---------- window ----------
 
@@ -890,4 +1144,36 @@ public class CyberslopSalvageSystem extends ScriptableSystem {
   }
 
   public final func CarHow() -> String { return this.m_carHow; }
+}
+
+// ---------- 1.2.0 wraps ----------
+
+// Every item drop (dropped gun, ammo, loot bag, world pickup) tells the system it is in the
+// world. 1.2.2: only a queued request leaves this callback (as the game's own attach code does),
+// no state of the system is read or written here. The direct NoteDrop call of 1.2.0 / 1.2.1
+// crashed the game while a save loaded (exe+0x270242).
+@wrapMethod(gameItemDropObject)
+protected final cb func OnGameAttached() -> Bool {
+  let r: Bool = wrappedMethod();
+  let sys: ref<ScriptableSystem> = GameInstance.GetScriptableSystemsContainer(this.GetGame()).Get(n"CyberslopSalvage.CyberslopSalvageSystem");
+  let req: ref<CyberslopSalvageDropRequest>;
+  if IsDefined(sys) {
+    req = new CyberslopSalvageDropRequest();
+    req.drop = this;
+    sys.QueueRequest(req);
+  };
+  return r;
+}
+
+// A weapon V drops (inventory Drop, Drop Current Weapon, AutoDrop) is noted, so the units know it is V's.
+@wrapMethod(DropAction)
+public func CompleteAction(gameInstance: GameInstance) -> Void {
+  let data: wref<gameItemData> = this.GetItemData();
+  let who: wref<GameObject> = this.GetExecutor();
+  let sys: ref<CyberslopSalvageSystem>;
+  if IsDefined(data) && IsDefined(who) && who.IsPlayer() && RPGManager.IsItemWeapon(data.GetID()) {
+    sys = GameInstance.GetScriptableSystemsContainer(gameInstance).Get(n"CyberslopSalvage.CyberslopSalvageSystem") as CyberslopSalvageSystem;
+    if IsDefined(sys) { sys.NoteOwnDrop(data.GetID()); };
+  };
+  wrappedMethod(gameInstance);
 }

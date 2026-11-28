@@ -9,7 +9,21 @@ do
     end
   end
 end
--- Cyberslop Salvage 1.1.1 (2026-11-23)
+-- Cyberslop Salvage 1.2.4 (my mod, 2026-11-26)
+-- 1.2.4: every android look names its appearance. The records copied no appearanceName, and the android
+--   templates hold several factions (corpo__ep1_android_ma: 6, gang__ep1_android_ma: 22 incl. Maelstrom and
+--   Wraiths), so each spawn took a random skin. The name goes into the record and, if the spawned entity
+--   still shows another one, is applied once more with ScheduleAppearanceChange.
+-- 1.2.3: CET input cs_android_key (Numpad 2) for android 1: hold 0.5 s = deploy from the trunk / send home,
+--   tap = go / wait (standby / resume).
+-- 1.2.2: version number only. The fix is in the .reds (item drops report through a queued request,
+--   CTD exe+0x270242 while a save loads).
+-- 1.2.1: a body or drop holding nothing the unit takes is not visited (LootableCount; before, any item in
+--   the list counted, also hidden ones); the loot line in the log names each item with its weight.
+-- 1.2.0: the units pick up guns lying on the ground, next to a body or not. The targeting query used for the
+--   search does not return dropped weapons, so the redscript side keeps a list of the item drops in the world
+--   (FindWeaponDrops). Loose guns: not iconic, not quest, not one V dropped (setting). A pickup takes half the
+--   search time of a body and wears the unit 0.1 % (body 0.5 %).
 -- 1.1.1: Take / Take all only with the unit next to V (6 m), as the README says; a unit on standby stays out up
 --   to 150 m away and could be emptied from there.
 -- Carry drone (cosmetic RP mule), five salvage androids and a salvage drone (loot downed enemies into
@@ -22,7 +36,7 @@ end
 -- Build 2 (review): full gate per unit, looted list cleared on a load, routine notices not queued.
 -- Revert: delete this folder and r6\scripts\CyberslopSalvage.
 
-local VERSION = "1.1.1"
+local VERSION = "1.2.4"
 local TAKE_RANGE = 6.0   -- 1.1.1: metres between V and the unit for Take / Take all
 local TDB = "CyberslopSalvage."
 local SYS = "CyberslopSalvage.CyberslopSalvageSystem"
@@ -34,7 +48,8 @@ local RESUME_WALK = 60.0    -- m: a resumed unit this close walks over, a farthe
 local TRAVEL_SPEED = 5.0    -- m/s, travel time of a unit called from far away
 local HOLD_SECONDS = 86400.0
 
-local cfg = { log = true, autoLoot = true, tripMinutes = 120, fencePct = 80,
+-- looseWeapons: guns on the ground away from any body are picked up too; ownDrops: also the ones V dropped
+local cfg = { log = true, autoLoot = true, looseWeapons = true, ownDrops = false, tripMinutes = 120, fencePct = 80,
               look = { carry = 1, android = 1, android2 = 1, android3 = 1, android4 = 1, android5 = 1, octant = 1 } }
 
 local overlay = false
@@ -48,13 +63,14 @@ local emptySeen, emptyN = {}, 0
 
 -- ---------------------------------------------------------------- units
 
+-- [3] = appearance in the record's entity template (ep1\characters\entities\corpo|gang\*__ep1_android_ma.ent)
 local ANDROID_LOOKS = {
-  { "Militech", "Character.militech_android_android2_crusher_ma" },
-  { "Arasaka", "Character.arasaka_android_android2_shingen_ma" },
-  { "Kang Tao", "Character.kangtao_android_android2_dian_ma" },
-  { "Scavengers", "Character.scavenger_android_android2_pulsar_ma" },
-  { "Sixth Street", "Character.sixthstreet_android_android2_saratoga_ma" },
-  { "NCPD", "Character.prevention_android_rifle_ma" },
+  { "Militech", "Character.militech_android_android2_crusher_ma", "corpo__android_ma_militech_droid__lvl2_01" },
+  { "Arasaka", "Character.arasaka_android_android2_shingen_ma", "corpo__android_ma_arasaka_droid__lvl2_01" },
+  { "Kang Tao", "Character.kangtao_android_android2_dian_ma", "corpo__android_ma_kang_tao_droid__lvl2_01" },
+  { "Scavengers", "Character.scavenger_android_android2_pulsar_ma", "gang__android_ma_scavenger_droid__lvl2_01" },
+  { "Sixth Street", "Character.sixthstreet_android_android2_saratoga_ma", "gang__android_ma_6th_street_droid_lvl1_01" },
+  { "NCPD", "Character.prevention_android_rifle_ma", "corpo__android_ma_ncpd_droid__lvl1_01" },
 }
 
 -- n = 1..5; unit = cargo unit id in redscript; stow = "car" (trunk of any own car) or "van"
@@ -282,7 +298,8 @@ end
 
 -- copies a vanilla character into our subcharacter record: unarmed, player side, x5 health
 local function buildUnit(u)
-  local base = u.looks[cfg.look[u.key]][2]
+  local look = u.looks[cfg.look[u.key]]
+  local base = look[2]
   if TweakDB:GetRecord(base) == nil then
     log("ERROR base record missing: " .. base)
     return false
@@ -309,6 +326,7 @@ local function buildUnit(u)
   TweakDB:SetFlatNoUpdate(id .. ".lootBagEntity", "None")
   TweakDB:SetFlatNoUpdate(id .. ".primaryEquipment", TDB .. "NoWeapons")
   TweakDB:SetFlatNoUpdate(id .. ".secondaryEquipment", TDB .. "NoWeapons")
+  if look[3] then TweakDB:SetFlatNoUpdate(id .. ".appearanceName", look[3]) end
   local mods = TweakDB:GetFlat(base .. ".statModifiers") or {}
   local list = {}
   for _, m in ipairs(mods) do list[#list + 1] = m end
@@ -317,7 +335,7 @@ local function buildUnit(u)
   TweakDB:Update(id)
   local tpl = TweakDB:GetFlat(id .. ".entityTemplatePath")
   if tpl == nil or tostring(tpl) == "" then log("WARNING " .. id .. " has no entityTemplatePath") end
-  log("record " .. id .. " <- " .. base)
+  log("record " .. id .. " <- " .. base .. (look[3] and (" / " .. look[3]) or ""))
   return true
 end
 
@@ -589,6 +607,20 @@ local function startSpawn(u, pos, opts)
     u.ent = ent
     u.state = "deployed"
     applyCompanion(u, ent)
+    local app = u.looks[cfg.look[u.key]][3]
+    if app then
+      pcall(function()
+        local cur = NameToString(ent:GetCurrentAppearanceName())
+        if cur ~= app then
+          ent:ScheduleAppearanceChange(CName.new(app))
+          log(string.format("appearance %s -> %s", tostring(cur), app))
+        end
+      end)
+    end
+    if u.cargo then
+      -- 1.2.0: how many item drops the redscript list holds (0 after minutes of play = its wrap is not running)
+      pcall(function() log("item drops known: " .. tostring(sys():DropsKnown())) end)
+    end
     if opts.quiet then return end
     if u.key == "carry" then
       notify("Carry drone inbound.")
@@ -890,11 +922,14 @@ end
 
 -- ---------------------------------------------------------------- looting
 
--- one search per tick for all idle units: downed non-civilians around V and the drops next to them
+-- one search per tick for all idle units: downed non-civilians around V, the drops next to them,
+-- and (1.2.0) guns lying on the ground
+local gunsFailed = false
 local function scan(player)
   if scanTick == tickN and scanList then return scanList end
   local list = {}
   local pp = player:GetWorldPosition()
+  local bodies, drops = {}, {}
   local ok, err = pcall(function()
     local q = Game["TSQ_ALL;"]()
     q.maxDistance = SCAN_RADIUS
@@ -902,7 +937,6 @@ local function scan(player)
     q.ignoreInstigator = true
     local found, parts = Game.GetTargetingSystem():GetTargetParts(player, q)
     if not found or not parts then return end
-    local bodies, drops = {}, {}
     local seen = {}
     for _, part in ipairs(parts) do
       pcall(function()
@@ -919,18 +953,56 @@ local function scan(player)
           bodies[#bodies + 1] = { ent = ent, key = key, pos = p, dP = dist(p, pp) }
         elseif ent:IsA("gameItemDropObject") then
           local p = ent:GetWorldPosition()
-          drops[#drops + 1] = { ent = ent, key = key, pos = p, dP = dist(p, pp) }
+          drops[#drops + 1] = { ent = ent, key = key, pos = p, dP = dist(p, pp), drop = true }
         end
       end)
     end
-    for _, b in ipairs(bodies) do list[#list + 1] = b end
-    for _, dr in ipairs(drops) do
-      for _, b in ipairs(bodies) do
-        if dist(dr.pos, b.pos) <= 4.0 then list[#list + 1] = dr break end
-      end
-    end
   end)
   if not ok then log("search failed: " .. tostring(err)) end
+  local listed = {}
+  for _, b in ipairs(bodies) do list[#list + 1] = b end
+  -- 1.2.0: guns on the ground, from the redscript drop list (the query above does not return them).
+  -- Next to a body: any gun. Away from one: setting on, and not an iconic (V picks those up).
+  local s = sys()
+  if s and not gunsFailed then
+    local okG, errG = pcall(function()
+      local guns = s:FindWeaponDrops(SCAN_RADIUS, cfg.ownDrops)
+      if not guns then return end
+      for i, ent in ipairs(guns) do
+        if ent and IsDefined(ent) then
+          local key = entKey(ent)
+          if not listed[key] then
+            local p = ent:GetWorldPosition()
+            local near = false
+            for _, b in ipairs(bodies) do
+              if dist(p, b.pos) <= 4.0 then near = true break end
+            end
+            if near or (cfg.looseWeapons and s:FoundPlain(i - 1)) then
+              listed[key] = true
+              -- count is known: redscript saw a gun there (it may be linked to the drop, not in its item list)
+              list[#list + 1] = { ent = ent, key = key, pos = p, dP = dist(p, pp), drop = true, gun = true,
+                                  loose = not near, count = 1 }
+            end
+          end
+        end
+      end
+    end)
+    if not okG then
+      gunsFailed = true   -- redscript part older than 1.2.0: say it once, keep looting bodies
+      log("gun search failed, off until the next reload: " .. tostring(errG))
+    end
+  end
+  for _, dr in ipairs(drops) do
+    if not listed[dr.key] then
+      for _, b in ipairs(bodies) do
+        if dist(dr.pos, b.pos) <= 4.0 then
+          list[#list + 1] = dr
+          listed[dr.key] = true
+          break
+        end
+      end
+    end
+  end
   scanTick, scanList = tickN, list
   return list
 end
@@ -951,10 +1023,17 @@ local function findTarget(u, player)
     if c.dP <= u.radius and not u.looted[c.key] and not emptySeen[c.key] and not claimedByOther(u, c.key) then
       if c.count == nil then
         c.count = 0
-        pcall(function()
-          local _, items = Game.GetTransactionSystem():GetItemList(c.ent)
-          c.count = items and #items or 0
+        -- 1.2.1: what the unit would really take (redscript rules); item list size with an older .reds
+        local s = sys()
+        local okC = s ~= nil and pcall(function()
+          c.count = s:LootableCount(c.ent, (not c.drop) or cfg.ownDrops) or 0
         end)
+        if not okC then
+          pcall(function()
+            local _, items = Game.GetTransactionSystem():GetItemList(c.ent)
+            c.count = items and #items or 0
+          end)
+        end
         if c.count == 0 then
           if emptyN > 800 then emptySeen, emptyN = {}, 0 end
           emptySeen[c.key] = true
@@ -986,13 +1065,25 @@ local function lootTarget(u, target)
   local s = sys()
   markLooted(u, target.key)
   if not s then return end
-  local ok, n = pcall(function() return s:LootFrom(u.unit, target.ent, u.capacity) end)
+  local ok, n = pcall(function()
+    -- 1.2.0: a drop goes through LootDrop (the unit itself carries a gun that is only linked to its drop)
+    if target.drop then return s:LootDrop(u.unit, target.ent, u.ent, u.capacity, cfg.ownDrops) end
+    return s:LootFrom(u.unit, target.ent, u.capacity)
+  end)
   if not ok then log("LootFrom error: " .. tostring(n)) return end
-  local cash, left = 0, 0
+  local cash, left, how = 0, 0, ""
   pcall(function() cash = s:LastCash() left = s:LastLeft() end)
+  if target.drop then pcall(function() how = " (drop, " .. tostring(s:LastHow()) .. ")" end) end
   local kg = cargoKg(u)
-  log(string.format("%s looted %s: %s items, cash %d, left %d, cargo %.1f kg", u.key, target.key, tostring(n), cash, left, kg))
-  if cash > 0 then notify(string.format("%s wired you E$ %d found on the body.", u.name, cash), true) end
+  local what = ""
+  pcall(function()
+    local w = s:LastWhat()
+    if w and w ~= "" then what = " [" .. tostring(w) .. "]" end
+  end)
+  log(string.format("%s looted %s%s: %s items, cash %d, left %d, cargo %.1f kg%s", u.key, target.key, how, tostring(n), cash, left, kg, what))
+  if cash > 0 then
+    notify(string.format(target.drop and "%s wired you E$ %d it picked up." or "%s wired you E$ %d found on the body.", u.name, cash), true)
+  end
   if n == -1 or left > 0 then
     -- items stayed on the body: visit it again once there is room (the full gate waits for this unit's cargo to shrink)
     if u.looted[target.key] then
@@ -1032,9 +1123,11 @@ local function lootTick(u, player, inCombat)
     local target = findTarget(u, player)
     if not target then return end
     local tp = target.pos
-    u.run = { ent = target.ent, key = target.key, pos = tp, phase = "move", t = 0.0 }
+    u.run = { ent = target.ent, key = target.key, pos = tp, phase = "move", t = 0.0, drop = target.drop }
     setNoRole(ent)
-    log(string.format("%s heading to %s (%.0f m)", u.key, target.key, dist(ent:GetWorldPosition(), tp)))
+    log(string.format("%s heading to %s (%s%.0f m)", u.key, target.key,
+      target.gun and (target.loose and "loose gun, " or "gun by a body, ") or (target.drop and "drop, " or ""),
+      dist(ent:GetWorldPosition(), tp)))
     if u.fly then
       local gen = u.gen
       glide(u, tp.x, tp.y, tp.z + 2.5, 6.0, function()
@@ -1055,8 +1148,9 @@ local function lootTick(u, player, inCombat)
       markLooted(u, r.key)
       finishRun(u)
     end
-  elseif r.phase == "work" and r.t >= workTime(u) then
-    lootTarget(u, { ent = r.ent, key = r.key })
+  elseif r.phase == "work" and r.t >= workTime(u) * (r.drop and 0.5 or 1.0) then
+    -- 1.2.0: picking something up off the ground takes half the time of searching a body
+    lootTarget(u, { ent = r.ent, key = r.key, drop = r.drop })
     finishRun(u)
   end
 end
@@ -1462,6 +1556,10 @@ local function drawBody()
   if ImGui.CollapsingHeader("Settings##cs") then
     local val, pressed = ImGui.Checkbox("Auto-loot downed enemies (out of combat)", cfg.autoLoot)
     if pressed then cfg.autoLoot = val saveCfg() end
+    local lw, pressedW = ImGui.Checkbox("Pick up guns lying away from any body", cfg.looseWeapons)
+    if pressedW then cfg.looseWeapons = lw saveCfg() end
+    local od, pressedO = ImGui.Checkbox("Also pick up weapons V dropped", cfg.ownDrops)
+    if pressedO then cfg.ownDrops = od saveCfg() end
     local m, used = ImGui.SliderInt("Trip (game minutes)", cfg.tripMinutes, 30, 240)
     if used and m ~= cfg.tripMinutes then cfg.tripMinutes = m saveCfg() end
     local f, usedF = ImGui.SliderInt("Fence pays (% of vendor price)", cfg.fencePct, 50, 100)
@@ -1499,6 +1597,56 @@ local function toggleVan()
   end
 end
 
+-- 1.2.3: one key for android 1 (Numpad 2). Hold = deploy from the trunk, or send home when it is out.
+-- Tap = go / wait: a working android stops and waits, a waiting one comes back and works.
+local KEY_HOLD = 0.5   -- seconds the key must stay down to count as a hold
+local akey = { down = false, t = 0.0, fired = false }
+
+local function androidHold()
+  local u = UNITS.android
+  if u.state == "home" then
+    deploy(u)
+  elseif u.state == "leaving" then
+    notify(u.name .. " is already heading back.")
+  else
+    leave(u, u.name .. " heading back. Cargo stays aboard.")
+  end
+end
+
+local function androidTap()
+  local u = UNITS.android
+  if u.state == "deployed" then
+    standby(u)
+  elseif u.state == "standby" then
+    resume(u)
+  elseif u.state == "home" then
+    notify(u.name .. " is stowed. Hold the key to deploy it.")
+  elseif u.state == "leaving" then
+    notify(u.name .. " is heading back.")
+  else
+    notify(u.name .. " is on its way.")
+  end
+end
+
+local function androidKeyFrame(dt)
+  if not akey.down or akey.fired then return end
+  akey.t = akey.t + dt
+  if akey.t >= KEY_HOLD then
+    akey.fired = true
+    androidHold()
+  end
+end
+
+registerInput("cs_android_key", "Salvage android 1: hold = deploy / send home, tap = go / wait", function(down)
+  if down then
+    akey.down, akey.t, akey.fired = true, 0.0, false   -- a lost release (menu) never blocks the next press
+    return
+  end
+  local wasTap = akey.down and not akey.fired
+  akey.down, akey.fired = false, false
+  if wasTap then androidTap() end
+end)
+
 registerHotkey("cs_carry", "Carry drone: call / send to stash", function() toggle("carry") end)
 registerHotkey("cs_android", "Salvage android 1 (trunk): deploy / send home", function() toggle("android") end)
 registerHotkey("cs_octant", "Salvage drone: deploy / send home", function() toggle("octant") end)
@@ -1517,6 +1665,7 @@ registerForEvent("onOverlayOpen", function() overlay = true view.version = -1 en
 registerForEvent("onOverlayClose", function() overlay = false end)
 
 registerForEvent("onUpdate", function(dt)
+  if akey.down then pcall(androidKeyFrame, dt) end
   for _, k in ipairs(ORDER) do
     local u = UNITS[k]
     if u.glide then stepGlide(u, dt) end

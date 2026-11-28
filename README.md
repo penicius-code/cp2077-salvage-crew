@@ -1,7 +1,7 @@
 # Cyberslop Salvage
 
 Salvage androids and a salvage drone that collect loot from downed enemies after a fight, for Cyberpunk 2077. Single-player only.
-Version 1.1.1 | For game version 2.5 | Status: runs in game (the mod's own log shows deploying, looting, standby and service); no written test pass yet, see Status
+Version 1.2.4 | For game version 2.5 | Status: 1.1.1 runs in game (the mod's own log shows deploying, looting, standby and service); 1.2.0 ran in game on 2.5 (guns picked up, no errors in its log); 1.2.1 to 1.2.4 not run in game yet; no written test pass, see Status
 
 **Download:** [latest release](https://github.com/penicius-code/cp2077-salvage-crew/releases/latest) (zip; install steps below)
 
@@ -9,7 +9,7 @@ Version 1.1.1 | For game version 2.5 | Status: runs in game (the mod's own log s
 
 <p>
 <img src="docs/media/overlay-window.png" width="480" alt="The Cyberslop Salvage window with carry drone and van crew buttons and collapsed rows for five salvage androids and the drone showing location, load and condition.">
-<img src="docs/media/mock-test.png" width="480" alt="The offline mock test passing: 125 passed, 0 failed">
+<img src="docs/media/mock-test.png" width="480" alt="The offline mock test passing on 1.1.1: 125 passed, 0 failed">
 </p>
 
 ## The problem
@@ -18,7 +18,7 @@ After a large fight, looting every body by hand is a chore, and the companion-dr
 
 ## What I built
 
-A Cyber Engine Tweaks script (1,578 lines of Lua) and a redscript system (894 lines). It adds: up to five salvage androids, one flying salvage drone and a cosmetic carry drone. The salvage units walk or fly to downed enemies once combat is over, take the loot into their own cargo, and wire you any cash they find. It changes: which items remain on downed enemies, and it stores its own cargo ledger in the save. No game function is hooked.
+A Cyber Engine Tweaks script (1,726 lines of Lua) and a redscript system (1,179 lines). It adds: up to five salvage androids, one flying salvage drone and a cosmetic carry drone. The salvage units walk or fly to downed enemies once combat is over, take the loot into their own cargo, and wire you any cash they find. It changes: which items remain on downed enemies, and it stores its own cargo ledger in the save. No game function is hooked.
 
 ## How it works
 
@@ -34,7 +34,7 @@ A Cyber Engine Tweaks script (1,578 lines of Lua) and a redscript system (894 li
 package/
   bin/x64/plugins/cyber_engine_tweaks/mods/CyberslopSalvage/init.lua
   r6/scripts/CyberslopSalvage/CyberslopSalvage.reds
-tests/mock.lua    runs the Lua against a stubbed game API (125 checks)
+tests/mock.lua    runs the Lua against a stubbed game API (180 checks)
 ```
 
 ## Requirements
@@ -69,18 +69,21 @@ In the window, saved to `config.json` in the mod's folder:
 | Auto-loot downed enemies (out of combat) | on | |
 | Trip (game minutes) | 120 | 30 to 240 |
 | Fence pays (% of vendor price) | 80 | 50 to 100 |
+| Pick up guns lying away from any body | on | |
+| Also pick up weapons V dropped | off | |
 | Log to `CyberslopSalvage.log` | on | |
 | Appearance per unit | first | |
 
-Five hotkeys can be bound in CET's Bindings tab, all unbound by default: carry drone call / send to stash; salvage android 1 deploy / send home; salvage drone deploy / send home; van androids 2-5 deploy all / send home; all salvage units standby / resume.
+Five hotkeys can be bound in CET's Bindings tab, all unbound by default: carry drone call / send to stash; salvage android 1 deploy / send home; salvage drone deploy / send home; van androids 2-5 deploy all / send home; all salvage units standby / resume. One input, also unbound: android 1 hold = deploy / send home, tap = go / wait.
 
 ## Status
 
 | What | Result |
 |---|---|
 | In game, 2.5 | The mod's log from play sessions shows units deployed from a car, bodies looted, cash wired, standby, return and service. |
+| In game, 1.2.x | 1.2.0: one session on 2.5, its log shows 7 guns picked up from drops and no errors. 1.2.0 and 1.2.1 could crash the game while a save loaded (fixed in 1.2.2, see the changelog). 1.2.1 to 1.2.4 not run in game yet. |
 | Written test pass | None yet. The test list for 1.1.x (five androids, van crew, standby, wear and service) has not been worked through and signed off. |
-| Mock test | 125 of 125 checks pass on 1.1.1 with LuaJIT. The test was adjusted for 1.1.1's rule that "Take" needs the unit within 6 m: the stub world now places the unit next to the player before taking. |
+| Mock test | 180 of 180 checks pass on 1.2.4 with LuaJIT, also in CI (1.1.1: 125 of 125). The test was adjusted for 1.1.1's rule that "Take" needs the unit within 6 m: the stub world now places the unit next to the player before taking. |
 | Compile | redscript compiles with 0 errors. |
 
 ## Compatibility
@@ -111,7 +114,7 @@ Five hotkeys can be bound in CET's Bindings tab, all unbound by default: carry d
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md). Latest: 1.1.1 (2026-11-23): "Take" only with the unit within 6 m.
+See [CHANGELOG.md](CHANGELOG.md). Latest: 1.2.4 (2026-11-26): android 1 has a hold / tap key, guns on the ground are picked up, and android skins no longer change at random.
 
 ## Credits and licence
 
